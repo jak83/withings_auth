@@ -88,6 +88,18 @@ def get_config(directory=None) -> dict:
     )
 
 
+def _read_local(directory=None) -> dict:
+    """Read the locally stored tokens, or {} when there are none."""
+    token_file = token_dir(directory) / "tokens.json"
+    if not token_file.exists():
+        return {}
+    try:
+        return json.loads(token_file.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning(f"Could not read {token_file}: {e}")
+        return {}
+
+
 def load_tokens(directory=None) -> dict:
     """
     Load the current tokens, preferring the bridge.
@@ -99,18 +111,22 @@ def load_tokens(directory=None) -> dict:
         dict: the stored tokens, or {} when none are available.
     """
     store = token_dir(directory)
+    local = _read_local(store)
 
     fetched = bridge.fetch_tokens(store)
     if fetched:
+        # Never prefer an older bridge copy. A tool that does not publish -
+        # anything using .withings/oauth_helper.py, for instance - can rotate
+        # the local tokens, and the rotation already invalidated the bridge's
+        # refresh token. Publish the newer local copy instead.
+        if local and float(local.get("expires_at") or 0) > float(fetched.get("expires_at") or 0):
+            logger.info("Local Withings tokens are newer than the bridge; "
+                        "keeping them and publishing.")
+            bridge.push_tokens(local)
+            return local
         return fetched
 
-    token_file = store / "tokens.json"
-    if token_file.exists():
-        try:
-            return json.loads(token_file.read_text())
-        except (OSError, json.JSONDecodeError) as e:
-            logger.warning(f"Could not read {token_file}: {e}")
-    return {}
+    return local
 
 
 def save_tokens(tokens: dict, directory=None):

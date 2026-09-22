@@ -221,3 +221,33 @@ class TestConfig(StoreTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDoesNotPreferStaleBridgeTokens(StoreTestCase):
+    """
+    A tool that rotates Withings tokens without publishing (the OAuth helper,
+    for one) leaves the bridge holding an invalidated refresh token. Preferring
+    it would break everything.
+    """
+
+    def test_newer_local_is_kept_and_published(self):
+        self._write(_tokens(access="local-new", refresh="r-new", offset=10800))
+        stale = _tokens(access="bridge-old", refresh="r-old", offset=600)
+
+        with patch.dict(os.environ, BRIDGE_ENV, clear=True):
+            with patch("requests.get", return_value=_response(200, stale)):
+                with patch("requests.put", return_value=_response(200)) as mock_put:
+                    loaded = withings_auth.load_tokens(self.store)
+
+        self.assertEqual(loaded["access_token"], "local-new")
+        self.assertEqual(mock_put.call_args[1]["json"]["refresh_token"], "r-new")
+
+    def test_newer_bridge_still_wins(self):
+        self._write(_tokens(access="local-old", offset=600))
+        fresh = _tokens(access="bridge-new", offset=10800)
+
+        with patch.dict(os.environ, BRIDGE_ENV, clear=True):
+            with patch("requests.get", return_value=_response(200, fresh)):
+                loaded = withings_auth.load_tokens(self.store)
+
+        self.assertEqual(loaded["access_token"], "bridge-new")
