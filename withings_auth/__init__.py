@@ -28,12 +28,12 @@ import os
 import time
 from pathlib import Path
 
-from . import bridge
+from . import bridge, service
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["get_access_token", "load_tokens", "save_tokens", "get_config",
-           "token_dir", "bridge"]
+           "token_dir", "bridge", "service"]
 
 DEFAULT_TOKEN_DIR = "~/.withings"
 
@@ -217,6 +217,14 @@ def get_access_token(directory=None, config=None) -> str:
         RuntimeError: when no tokens exist or the refresh is rejected, both of
         which mean the account must be authorised again.
     """
+    # The token service owns the refresh token; we only borrow an access
+    # token, so there is nothing here to rotate or go stale.
+    if service.is_configured():
+        try:
+            return service.fetch_access_token()["access_token"]
+        except Exception as e:
+            logger.warning(f"Token service unusable, falling back: {e}")
+
     tokens = load_tokens(directory)
     if not tokens:
         raise RuntimeError(

@@ -251,3 +251,66 @@ class TestDoesNotPreferStaleBridgeTokens(StoreTestCase):
                 loaded = withings_auth.load_tokens(self.store)
 
         self.assertEqual(loaded["access_token"], "bridge-new")
+
+
+SERVICE_ENV = {
+    "TOKEN_SERVICE_URL": "https://klaanisodat.fi/auth",
+    "TOKEN_SERVICE_KEY": "machine-key",
+}
+
+
+class TestServiceMode(StoreTestCase):
+    """The server keeps the refresh token; this client only borrows access."""
+
+    def test_off_unless_both_variables_are_set(self):
+        from withings_auth import service
+        for env in ({}, {"TOKEN_SERVICE_URL": "x"}, {"TOKEN_SERVICE_KEY": "y"}):
+            with patch.dict(os.environ, env, clear=True):
+                self.assertFalse(service.is_configured(), env)
+        with patch.dict(os.environ, SERVICE_ENV, clear=True):
+            self.assertTrue(service.is_configured())
+
+    def test_fetch_sends_the_machine_key(self):
+        from withings_auth import service
+        with patch.dict(os.environ, SERVICE_ENV, clear=True):
+            with patch("requests.get",
+                       return_value=_response(200, {"access_token": "svc"})) as mock_get:
+                got = service.fetch_access_token()
+
+        url, = mock_get.call_args[0]
+        self.assertEqual(url, "https://klaanisodat.fi/auth/withings/access-token")
+        self.assertEqual(mock_get.call_args[1]["headers"]["Authorization"],
+                         "Bearer machine-key")
+        self.assertEqual(got["access_token"], "svc")
+
+    def test_service_errors_are_explained(self):
+        from withings_auth import service
+        with patch.dict(os.environ, SERVICE_ENV, clear=True):
+            for status, expected in {401: "rejected", 404: "no withings token",
+                                     503: "expired"}.items():
+                with patch("requests.get", return_value=_response(status)):
+                    with self.assertRaises(RuntimeError) as cm:
+                        service.fetch_access_token()
+                self.assertIn(expected, str(cm.exception).lower(), status)
+
+    def test_get_access_token_prefers_the_service_and_never_refreshes(self):
+        # A local token that is expired would normally force a refresh.
+        self._write(_tokens(access="local-expired", offset=-60))
+
+        with patch.dict(os.environ, SERVICE_ENV, clear=True):
+            with patch("requests.get",
+                       return_value=_response(200, {"access_token": "from-service"})):
+                with patch("requests.post") as mock_post:
+                    token = withings_auth.get_access_token(self.store)
+
+        self.assertEqual(token, "from-service")
+        mock_post.assert_not_called()
+
+    def test_falls_back_when_the_service_is_down(self):
+        self._write(_tokens(access="local-good", offset=10800))
+
+        with patch.dict(os.environ, SERVICE_ENV, clear=True):
+            with patch("requests.get", side_effect=OSError("service down")):
+                token = withings_auth.get_access_token(self.store)
+
+        self.assertEqual(token, "local-good")
